@@ -1,5 +1,6 @@
 import json
 import logging
+import base64
 from google.cloud import pubsub_v1
 from flask import current_app
 
@@ -51,7 +52,18 @@ def publish_mp4_conversion_task(resource_id):
     return publish_message(topic_name, message_data)
 
 def publish_media_processing_task(resource_id, file_path, output_folder, qualities):
-    """Publishes a media processing task to the Pub/Sub topic."""
+    """
+    Publishes a media processing task to the Pub/Sub topic for HLS streaming generation.
+    
+    Args:
+        resource_id: ID of the resource to process
+        file_path: Path to the source video file
+        output_folder: Output folder for HLS segments and playlists
+        qualities: List of quality definitions for transcoding
+        
+    Returns:
+        Message ID if successful
+    """
     topic_name = current_app.config.get('PUBSUB_MEDIA_PROCESSING_TOPIC')
     message_data = {
         'resource_id': resource_id,
@@ -59,6 +71,50 @@ def publish_media_processing_task(resource_id, file_path, output_folder, qualiti
         'output_folder': output_folder,
         'qualities': qualities,
         'task_type': 'process_media'
+    }
+    return publish_message(topic_name, message_data)
+
+def publish_dash_generation_task(resource_id, file_path, output_folder):
+    """
+    Publishes a DASH generation task to the Pub/Sub topic.
+    
+    Args:
+        resource_id: ID of the resource to process
+        file_path: Path to the source video file
+        output_folder: Output folder for DASH segments and manifest
+        
+    Returns:
+        Message ID if successful
+    """
+    topic_name = current_app.config.get('PUBSUB_MEDIA_PROCESSING_TOPIC')
+    message_data = {
+        'resource_id': resource_id,
+        'file_path': file_path,
+        'output_folder': output_folder,
+        'task_type': 'generate_dash'
+    }
+    return publish_message(topic_name, message_data)
+
+def publish_thumbnail_generation_task(resource_id, file_path, output_folder, timestamps=None):
+    """
+    Publishes a thumbnail generation task to the Pub/Sub topic.
+    
+    Args:
+        resource_id: ID of the resource to process
+        file_path: Path to the source video file
+        output_folder: Output folder for thumbnails
+        timestamps: Optional list of timestamps for thumbnail extraction
+        
+    Returns:
+        Message ID if successful
+    """
+    topic_name = current_app.config.get('PUBSUB_MEDIA_PROCESSING_TOPIC')
+    message_data = {
+        'resource_id': resource_id,
+        'file_path': file_path,
+        'output_folder': output_folder,
+        'timestamps': timestamps or [0],  # Default to first frame
+        'task_type': 'generate_thumbnails'
     }
     return publish_message(topic_name, message_data)
 
@@ -113,10 +169,33 @@ def validate_pubsub_message(request):
             logging.error("Invalid Pub/Sub message: no data field")
             return None
             
-        # Decode message data
-        data = json.loads(pubsub_message['data'].decode('base64'))
+        # Decode message data - using base64 module for better compatibility
+        try:
+            decoded_data = base64.b64decode(pubsub_message['data'])
+            data = json.loads(decoded_data)
+        except Exception as decode_error:
+            logging.error(f"Error decoding base64 data: {decode_error}")
+            # Try legacy format as fallback
+            try:
+                data = json.loads(pubsub_message['data'].decode('base64'))
+            except Exception as legacy_error:
+                logging.error(f"Error with legacy decoding: {legacy_error}")
+                return None
         
         return data
     except Exception as e:
         logging.error(f"Error validating Pub/Sub message: {e}")
         return None
+
+def delete_subscription(subscription_id):
+    """Deletes a Pub/Sub subscription."""
+    try:
+        project_id = current_app.config.get('GCP_PROJECT_ID')
+        subscriber = pubsub_v1.SubscriberClient()
+        subscription_path = subscriber.subscription_path(project_id, subscription_id)
+        
+        subscriber.delete_subscription(request={"subscription": subscription_path})
+        logging.info(f"Deleted subscription: {subscription_path}")
+    except Exception as e:
+        logging.error(f"Error deleting subscription: {e}")
+        raise
